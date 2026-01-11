@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda Function with IAM-first design for aws-serverless-iam-in-action'
+
+Parameters:
+  FunctionName:
+    Type: String
+    Default: hello-lambda-function
+    Description: Name of the Lambda function
+
+  Runtime:
+    Type: String
+    Default: java21
+    Description: Lambda runtime version
+
+Resources:
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${FunctionName}-execution-role'
+      Description: 'IAM role for Lambda function with least privilege CloudWatch Logs permissions'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaExecutionRoleTrustPolicy
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub '${FunctionName}-logs-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogsPermissions
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+      Tags:
+        - Key: Project
+          Value: aws-serverless-iam-in-action
+        - Key: Purpose
+          Value: lambda-execution
+
+  # CloudWatch Log Group
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${FunctionName}'
+      RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: aws-serverless-iam-in-action
+
+  # Lambda Function
+  HelloLambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaLogGroup
+    Properties:
+      FunctionName: !Ref FunctionName
+      Description: 'Minimal serverless API demonstrating IAM-first design'
+      Runtime: !Ref Runtime
+      Handler: com.yarleesols.HelloHandler::handleRequest
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          # Placeholder - deploy actual JAR file
+          # Build: mvn clean package
+          # Deploy: aws lambda update-function-code --function-name hello-lambda-function --zip-file fileb://target/aws-serverless-iam-in-action-1.0-SNAPSHOT.jar
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: Project
+          Value: aws-serverless-iam-in-action
+        - Key: Environment
+          Value: dev
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt HelloLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-lambda-arn'
+
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref HelloLambdaFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-lambda-name'
+
+  LambdaExecutionRoleArn:
+    Description: ARN of the Lambda execution role
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-execution-role-arn'
+
+  LogGroupName:
+    Description: CloudWatch Log Group name
+    Value: !Ref LambdaLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-log-group'
+

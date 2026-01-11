@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'API Gateway REST API with IAM-first design for aws-serverless-iam-in-action'
+
+Parameters:
+  LambdaStackName:
+    Type: String
+    Default: hello-lambda-stack
+    Description: Name of the Lambda CloudFormation stack
+
+  StageName:
+    Type: String
+    Default: dev
+    Description: API Gateway stage name
+
+  RateLimit:
+    Type: Number
+    Default: 5
+    Description: Requests per second
+
+  BurstLimit:
+    Type: Number
+    Default: 10
+    Description: Burst limit for concurrent requests
+
+Resources:
+  # REST API
+  HelloRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: hello-api
+      Description: 'Production-grade REST API demonstrating IAM-first serverless design'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Project
+          Value: aws-serverless-iam-in-action
+
+  # /hello Resource
+  HelloResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref HelloRestApi
+      ParentId: !GetAtt HelloRestApi.RootResourceId
+      PathPart: hello
+
+  # POST Method
+  HelloPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref HelloRestApi
+      ResourceId: !Ref HelloResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations'
+          - LambdaArn:
+              Fn::ImportValue: !Sub '${LambdaStackName}-lambda-arn'
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # OPTIONS Method for CORS
+  HelloOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref HelloRestApi
+      ResourceId: !Ref HelloResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Lambda Permission for API Gateway
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::ImportValue: !Sub '${LambdaStackName}-lambda-name'
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HelloRestApi}/${StageName}/POST/hello'
+
+  # CloudWatch Log Group for API Gateway
+  ApiGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${HelloRestApi}/dev'
+      RetentionInDays: 7
+
+  # IAM Role for API Gateway Logging
+  ApiGatewayLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: api-gateway-cloudwatch-logs-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  # API Gateway Account (for logging configuration)
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayLoggingRole.Arn
+
+  # Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - HelloPostMethod
+      - HelloOptionsMethod
+    Properties:
+      RestApiId: !Ref HelloRestApi
+      Description: 'Initial deployment'
+
+  # Stage
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref HelloRestApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref StageName
+      Description: 'Development stage with logging and throttling'
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","sourceIp":"$context.identity.sourceIp","httpMethod":"$context.httpMethod","path":"$context.path","status":"$context.status","responseLength":"$context.responseLength","integrationLatency":"$context.integrationLatency","responseLatency":"$context.responseLatency"}'
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+          ThrottlingRateLimit: !Ref RateLimit
+          ThrottlingBurstLimit: !Ref BurstLimit
+      Tags:
+        - Key: Project
+          Value: aws-serverless-iam-in-action
+        - Key: Environment
+          Value: dev
+
+  # Gateway Response for 4XX errors
+  GatewayResponse4XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref HelloRestApi
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      ResponseTemplates:
+        application/json: '{"error": "$context.error.messageString", "requestId": "$context.requestId"}'
+
+  # Gateway Response for 5XX errors
+  GatewayResponse5XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref HelloRestApi
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+      ResponseTemplates:
+        application/json: '{"error": "Internal server error", "requestId": "$context.requestId"}'
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${HelloRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/hello'
+    Export:
+      Name: !Sub '${AWS::StackName}-api-endpoint'
+
+  RestApiId:
+    Description: REST API ID
+    Value: !Ref HelloRestApi
+    Export:
+      Name: !Sub '${AWS::StackName}-rest-api-id'
+
+  StageName:
+    Description: Stage name
+    Value: !Ref ApiStage
+    Export:
+      Name: !Sub '${AWS::StackName}-stage-name'
+
