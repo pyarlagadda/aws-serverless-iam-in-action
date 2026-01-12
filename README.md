@@ -68,6 +68,33 @@ No databases, no external dependencies. Pure focus on IAM and infrastructure.
 - **Trust Policy**: Defines WHO can assume a role (Lambda service)
 - **Permission Policy**: Defines WHAT actions are allowed (CloudWatch Logs)
 
+### 4. S3 Deployment Bucket Security
+
+Since Java Lambda functions require S3 deployment, the bucket must be hardened:
+
+**Encryption:**
+- **At Rest**: AES-256 server-side encryption enforced
+- **In Transit**: HTTPS/TLS required (HTTP denied by bucket policy)
+- **Policy Enforcement**: Unencrypted uploads are automatically denied
+
+**Access Control:**
+- **Public Access**: All 4 public access block settings enabled
+- **Principal Restriction**: Only Lambda service from same account can read
+- **Bucket Policy**: Explicit deny rules for insecure operations
+
+**Data Lifecycle:**
+- **Versioning**: Enabled to track all changes and prevent accidental deletion
+- **Old Version Cleanup**: Auto-delete non-current versions after 30 days
+- **Storage Optimization**: Auto-transition to cheaper storage classes
+
+**Why this matters:**
+- Lambda deployment JARs could contain sensitive business logic
+- Unencrypted buckets expose code to potential data breaches
+- Versioning enables rollback if malicious code is uploaded
+- Lifecycle policies reduce costs and minimize attack surface
+- HTTPS enforcement prevents man-in-the-middle attacks during upload/download
+
+
 ## 📁 Project Structure
 
 ```
@@ -93,38 +120,108 @@ aws-serverless-iam-in-action/
 
 ### Prerequisites
 
+Before you begin, ensure you have:
 - AWS CLI configured with appropriate credentials
-- Java 21 or higher
-- Maven 3.6+
+- Java 17 or higher installed
+- Maven 3.6+ installed
+- AWS account with permissions to create CloudFormation stacks, Lambda functions, API Gateway, IAM roles, and S3 buckets
 
-### Step 1: Build the Lambda Function
+### Step 1: Deploy Secure S3 Bucket
+
+Java Lambda functions must be deployed from S3. Create a **secure, encrypted** S3 bucket using CloudFormation:
+
+**Bash/Linux/Mac:**
+```bash
+aws cloudformation create-stack \
+  --stack-name lambda-deployment-bucket-stack \
+  --template-body file://infra/s3-deployment-bucket.yaml
+
+# Wait for bucket creation
+aws cloudformation wait stack-create-complete --stack-name lambda-deployment-bucket-stack
+
+# Get the bucket name
+BUCKET_NAME=$(aws cloudformation describe-stacks \
+  --stack-name lambda-deployment-bucket-stack \
+  --query 'Stacks[0].Outputs[?OutputKey==`BucketName`].OutputValue' \
+  --output text)
+echo "Bucket created: $BUCKET_NAME"
+```
+
+**PowerShell/Windows:**
+```powershell
+aws cloudformation create-stack `
+  --stack-name lambda-deployment-bucket-stack `
+  --template-body file://infra/s3-deployment-bucket.yaml
+
+# Wait for bucket creation
+aws cloudformation wait stack-create-complete --stack-name lambda-deployment-bucket-stack
+
+# Get the bucket name
+$BUCKET_NAME = aws cloudformation describe-stacks `
+  --stack-name lambda-deployment-bucket-stack `
+  --query 'Stacks[0].Outputs[?OutputKey==`BucketName`].OutputValue' `
+  --output text
+Write-Host "Bucket created: $BUCKET_NAME"
+```
+
+> 🔒 **Security Features**:
+> - **Encryption at rest** (AES-256)
+> - **Versioning enabled** (track changes, rollback if needed)
+> - **Public access blocked** (all 4 settings enabled)
+> - **HTTPS enforced** (deny non-SSL requests)
+> - **Encrypted uploads enforced** (deny unencrypted objects)
+> - **Lifecycle policies** (auto-cleanup old versions after 30 days)
+
+### Step 2: Build the Lambda Function
 
 ```bash
 mvn clean package
 ```
 
-### Step 2: Deploy Lambda Stack
+### Step 3: Upload Lambda JAR to S3
 
+**Bash/Linux/Mac:**
+```bash
+aws s3 cp target/aws-serverless-iam-in-action-1.0-SNAPSHOT.jar s3://${BUCKET_NAME}/
+```
+
+**PowerShell/Windows:**
+```powershell
+aws s3 cp target/aws-serverless-iam-in-action-1.0-SNAPSHOT.jar s3://$BUCKET_NAME/
+```
+
+> **Note**: The S3 bucket automatically encrypts all objects with AES-256. HTTPS is enforced by bucket policy.
+
+
+### Step 4: Deploy Lambda Stack
+
+**Bash/Linux/Mac:**
 ```bash
 aws cloudformation create-stack \
   --stack-name hello-lambda-stack \
   --template-body file://infra/lambda.yaml \
+  --parameters ParameterKey=S3Bucket,ParameterValue=${BUCKET_NAME} \
   --capabilities CAPABILITY_NAMED_IAM
 
 # Wait for stack creation
 aws cloudformation wait stack-create-complete --stack-name hello-lambda-stack
 ```
 
-### Step 3: Update Lambda Function Code
+**PowerShell/Windows:**
+```powershell
+aws cloudformation create-stack `
+  --stack-name hello-lambda-stack `
+  --template-body file://infra/lambda.yaml `
+  --parameters ParameterKey=S3Bucket,ParameterValue=$BUCKET_NAME `
+  --capabilities CAPABILITY_NAMED_IAM
 
-```bash
-aws lambda update-function-code \
-  --function-name hello-lambda-function \
-  --zip-file fileb://target/aws-serverless-iam-in-action-1.0-SNAPSHOT.jar
+# Wait for stack creation
+aws cloudformation wait stack-create-complete --stack-name hello-lambda-stack
 ```
 
-### Step 4: Deploy API Gateway Stack
+### Step 5: Deploy API Gateway Stack
 
+**Bash/Linux/Mac:**
 ```bash
 aws cloudformation create-stack \
   --stack-name hello-api-stack \
@@ -136,8 +233,21 @@ aws cloudformation create-stack \
 aws cloudformation wait stack-create-complete --stack-name hello-api-stack
 ```
 
-### Step 5: Get API Endpoint
+**PowerShell/Windows:**
+```powershell
+aws cloudformation create-stack `
+  --stack-name hello-api-stack `
+  --template-body file://infra/api-gateway.yaml `
+  --parameters ParameterKey=LambdaStackName,ParameterValue=hello-lambda-stack `
+  --capabilities CAPABILITY_NAMED_IAM
 
+# Wait for stack creation
+aws cloudformation wait stack-create-complete --stack-name hello-api-stack
+```
+
+### Step 6: Get API Endpoint
+
+**Bash/Linux/Mac:**
 ```bash
 aws cloudformation describe-stacks \
   --stack-name hello-api-stack \
@@ -145,14 +255,65 @@ aws cloudformation describe-stacks \
   --output text
 ```
 
+**PowerShell/Windows:**
+```powershell
+aws cloudformation describe-stacks `
+  --stack-name hello-api-stack `
+  --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' `
+  --output text
+```
+
+### Understanding the `wait` Command
+
+The `aws cloudformation wait` command monitors the stack status and blocks until:
+- **Success**: Stack reaches `CREATE_COMPLETE` or `UPDATE_COMPLETE`
+- **Failure**: Stack reaches a terminal failure state like `ROLLBACK_COMPLETE` or `UPDATE_ROLLBACK_COMPLETE`
+
+This is useful in automation scripts to ensure the stack is fully deployed before proceeding to the next step.
+
+**To check stack status manually:**
+```bash
+# Bash/Linux/Mac
+aws cloudformation describe-stacks --stack-name hello-lambda-stack --query 'Stacks[0].StackStatus' --output text
+```
+
+```powershell
+# PowerShell/Windows
+aws cloudformation describe-stacks --stack-name hello-lambda-stack --query 'Stacks[0].StackStatus' --output text
+```
+
+**Common Stack Statuses:**
+- `CREATE_IN_PROGRESS` - Stack is being created
+- `CREATE_COMPLETE` - Stack created successfully ✓
+- `ROLLBACK_IN_PROGRESS` - Creation failed, rolling back
+- `ROLLBACK_COMPLETE` - Stack creation failed, need to delete and retry
+- `DELETE_IN_PROGRESS` - Stack is being deleted
+- `DELETE_COMPLETE` - Stack deleted successfully
+
+**If you get `ROLLBACK_COMPLETE`:**
+```bash
+# Delete the failed stack
+aws cloudformation delete-stack --stack-name hello-lambda-stack
+aws cloudformation wait stack-delete-complete --stack-name hello-lambda-stack
+
+# Then retry the create-stack command
+```
+
 ## 🧪 Testing
 
 ### Test the API
 
+**Bash/Linux/Mac:**
 ```bash
 curl -X POST https://YOUR_API_ID.execute-api.YOUR_REGION.amazonaws.com/dev/hello \
   -H "Content-Type: application/json" \
   -d '{"name":"Prasad"}'
+```
+
+**PowerShell/Windows:**
+```powershell
+$response = Invoke-WebRequest -Uri "https://YOUR_API_ID.execute-api.YOUR_REGION.amazonaws.com/dev/hello" -Method POST -ContentType "application/json" -Body '{"name":"Prasad"}'
+$response.Content
 ```
 
 Expected Response:
@@ -164,7 +325,13 @@ Expected Response:
 
 ### View CloudWatch Logs
 
+**Bash/Linux/Mac:**
 ```bash
+aws logs tail /aws/lambda/hello-lambda-function --follow
+```
+
+**PowerShell/Windows:**
+```powershell
 aws logs tail /aws/lambda/hello-lambda-function --follow
 ```
 
@@ -270,6 +437,7 @@ The API Gateway invoke permission is a **resource-based policy** on the Lambda f
 
 ## 🧹 Cleanup
 
+**Bash/Linux/Mac:**
 ```bash
 # Delete API Gateway stack
 aws cloudformation delete-stack --stack-name hello-api-stack
@@ -278,7 +446,60 @@ aws cloudformation wait stack-delete-complete --stack-name hello-api-stack
 # Delete Lambda stack
 aws cloudformation delete-stack --stack-name hello-lambda-stack
 aws cloudformation wait stack-delete-complete --stack-name hello-lambda-stack
+
+# Empty S3 bucket (including all versions because versioning is enabled)
+BUCKET_NAME=$(aws cloudformation describe-stacks \
+  --stack-name lambda-deployment-bucket-stack \
+  --query 'Stacks[0].Outputs[?OutputKey==`BucketName`].OutputValue' \
+  --output text)
+
+# Delete all object versions
+aws s3api delete-objects --bucket ${BUCKET_NAME} \
+  --delete "$(aws s3api list-object-versions --bucket ${BUCKET_NAME} \
+  --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}' --output json)"
+
+# Delete all delete markers
+aws s3api delete-objects --bucket ${BUCKET_NAME} \
+  --delete "$(aws s3api list-object-versions --bucket ${BUCKET_NAME} \
+  --query='{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' --output json)"
+
+# Delete S3 bucket stack
+aws cloudformation delete-stack --stack-name lambda-deployment-bucket-stack
+aws cloudformation wait stack-delete-complete --stack-name lambda-deployment-bucket-stack
 ```
+
+**PowerShell/Windows:**
+```powershell
+# Delete API Gateway stack
+aws cloudformation delete-stack --stack-name hello-api-stack
+aws cloudformation wait stack-delete-complete --stack-name hello-api-stack
+
+# Delete Lambda stack
+aws cloudformation delete-stack --stack-name hello-lambda-stack
+aws cloudformation wait stack-delete-complete --stack-name hello-lambda-stack
+
+# Empty S3 bucket (including all versions because versioning is enabled)
+$BUCKET_NAME = aws cloudformation describe-stacks `
+  --stack-name lambda-deployment-bucket-stack `
+  --query 'Stacks[0].Outputs[?OutputKey==`BucketName`].OutputValue' `
+  --output text
+
+# Delete all object versions
+aws s3api delete-objects --bucket $BUCKET_NAME `
+  --delete "$(aws s3api list-object-versions --bucket $BUCKET_NAME `
+  --query='{Objects: Versions[].{Key:Key,VersionId:VersionId}}' --output json)"
+
+# Delete all delete markers
+aws s3api delete-objects --bucket $BUCKET_NAME `
+  --delete "$(aws s3api list-object-versions --bucket $BUCKET_NAME `
+  --query='{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' --output json)"
+
+# Delete S3 bucket stack
+aws cloudformation delete-stack --stack-name lambda-deployment-bucket-stack
+aws cloudformation wait stack-delete-complete --stack-name lambda-deployment-bucket-stack
+```
+
+> **Note**: Because versioning is enabled on the S3 bucket, you must delete all object versions and delete markers before CloudFormation can delete the bucket. The commands above handle this automatically.
 
 ## 📝 License
 

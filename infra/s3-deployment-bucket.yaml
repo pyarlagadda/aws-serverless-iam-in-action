@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Secure S3 bucket for Lambda deployment packages with encryption and access controls'
+
+Parameters:
+  BucketNamePrefix:
+    Type: String
+    Default: lambda-deployment
+    Description: Prefix for the S3 bucket name (account ID and region will be appended)
+
+Resources:
+  # S3 Bucket for Lambda Deployment
+  LambdaDeploymentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${BucketNamePrefix}-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+      Tags:
+        - Key: Project
+          Value: aws-serverless-iam-in-action
+        - Key: Purpose
+          Value: lambda-deployment
+        - Key: Security
+          Value: encrypted
+
+  # Bucket Policy - Restrict access to Lambda service and account principals
+  LambdaDeploymentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LambdaDeploymentBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow Lambda service to read deployment packages
+          - Sid: AllowLambdaServiceRead
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub '${LambdaDeploymentBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+
+          # Deny insecure transport (enforce HTTPS)
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt LambdaDeploymentBucket.Arn
+              - !Sub '${LambdaDeploymentBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+Outputs:
+  BucketName:
+    Description: Name of the S3 deployment bucket
+    Value: !Ref LambdaDeploymentBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-bucket-name'
+
+  BucketArn:
+    Description: ARN of the S3 deployment bucket
+    Value: !GetAtt LambdaDeploymentBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-bucket-arn'
+
+  BucketRegion:
+    Description: Region where the bucket is created
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub '${AWS::StackName}-bucket-region'
+

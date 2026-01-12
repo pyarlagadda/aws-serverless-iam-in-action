@@ -9,8 +9,17 @@ Parameters:
 
   Runtime:
     Type: String
-    Default: java21
+    Default: java17
     Description: Lambda runtime version
+
+  S3Bucket:
+    Type: String
+    Description: S3 bucket containing the Lambda deployment package
+
+  S3Key:
+    Type: String
+    Default: aws-serverless-iam-in-action-1.0-SNAPSHOT.jar
+    Description: S3 key for the Lambda deployment package
 
 Resources:
   # Lambda Execution Role
@@ -68,10 +77,8 @@ Resources:
       Timeout: 30
       MemorySize: 512
       Code:
-        ZipFile: |
-          # Placeholder - deploy actual JAR file
-          # Build: mvn clean package
-          # Deploy: aws lambda update-function-code --function-name hello-lambda-function --zip-file fileb://target/aws-serverless-iam-in-action-1.0-SNAPSHOT.jar
+        S3Bucket: !Ref S3Bucket
+        S3Key: !Ref S3Key
       Environment:
         Variables:
           LOG_LEVEL: INFO
